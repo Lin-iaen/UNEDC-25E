@@ -2,13 +2,13 @@
 """CSI camera demo for Raspberry Pi (headless OpenCV compatible).
 
 Usage:
-    python src/camera_demo.py --capture    # Single photo
-    python src/camera_demo.py --stream     # MJPEG HTTP stream at http://<ip>:5000
-    python src/camera_demo.py --test 30    # Capture 30 frames, show FPS
+    python src/camera_demo.py --capture           # Single photo
+    python src/camera_demo.py --capture --vflip   #   with vertical flip
+    python src/camera_demo.py --stream            # MJPEG HTTP stream at http://<ip>:5000
+    python src/camera_demo.py --test 30           # Capture 30 frames, show FPS
 """
 
 import argparse
-import io
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,13 +20,23 @@ from picamera2 import Picamera2
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "samples"
 
 
-def capture_single(cam):
-    cam.stop()
+def apply_flip(frame: np.ndarray, vflip: bool, hflip: bool) -> np.ndarray:
+    if vflip and hflip:
+        return cv2.flip(frame, -1)
+    if vflip:
+        return cv2.flip(frame, 0)
+    if hflip:
+        return cv2.flip(frame, 1)
+    return frame
+
+
+def capture_single(cam, vflip, hflip):
     cfg = cam.create_still_configuration()
     cam.configure(cfg)
     cam.start()
     frame = cam.capture_array()
     cam.stop()
+    frame = apply_flip(frame, vflip, hflip)
     save_image(frame)
 
 
@@ -39,29 +49,34 @@ def save_image(frame):
     print(f"Saved: {path}")
 
 
-def run_test(cam, count):
+def run_test(cam, count, vflip, hflip):
+    cam.configure(cam.create_preview_configuration())
+    cam.start()
     print(f"Capturing {count} frames ...")
-    frames = []
     start = time.perf_counter()
     for i in range(count):
         frame = cam.capture_array()
-        frames.append(frame)
+        if i == count - 1:
+            frame = apply_flip(frame, vflip, hflip)
+            save_image(frame)
         print(f"  {i+1}/{count}  shape={frame.shape} dtype={frame.dtype}")
     elapsed = time.perf_counter() - start
     fps = count / elapsed
     print(f"\nResult: {count} frames in {elapsed:.2f}s = {fps:.1f} FPS")
-    print(f"Frame shape: {frames[0].shape}")
-    save_image(frames[-1])
 
 
-def run_stream(cam, host="0.0.0.0", port=5000):
+def run_stream(cam, vflip, hflip, host="0.0.0.0", port=5000):
     from flask import Flask, Response
+
+    cam.configure(cam.create_preview_configuration())
+    cam.start()
 
     app = Flask(__name__)
 
     def generate():
         while True:
             frame = cam.capture_array()
+            frame = apply_flip(frame, vflip, hflip)
             bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
             _, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
             yield (
@@ -88,6 +103,8 @@ def main():
     parser.add_argument("--stream", action="store_true", help="Start MJPEG HTTP stream")
     parser.add_argument("--test", type=int, nargs="?", const=30, metavar="N",
                         help="Capture N frames and report FPS (default 30)")
+    parser.add_argument("--vflip", action="store_true", help="Flip image vertically")
+    parser.add_argument("--hflip", action="store_true", help="Flip image horizontally")
     args = parser.parse_args()
 
     if not any([args.capture, args.stream, args.test]):
@@ -96,13 +113,12 @@ def main():
 
     cam = Picamera2()
     try:
-        cam.start()
         if args.capture:
-            capture_single(cam)
+            capture_single(cam, args.vflip, args.hflip)
         elif args.stream:
-            run_stream(cam)
+            run_stream(cam, args.vflip, args.hflip)
         elif args.test:
-            run_test(cam, args.test)
+            run_test(cam, args.test, args.vflip, args.hflip)
     finally:
         cam.close()
 
