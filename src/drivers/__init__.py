@@ -1,4 +1,4 @@
-from .base_camera import BaseCamera
+from .camera import Camera
 from .base_can_motor import BaseCANMotor
 
-__all__ = ["BaseCamera", "BaseCANMotor"]
+__all__ = ["Camera", "BaseCANMotor"]

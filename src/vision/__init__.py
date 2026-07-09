@@ -1,4 +1,4 @@
 from .base_tracker import BaseTracker
-from .web_stream_debugger import WebStreamDebugger
+from .web_stream import MjpegStreamer
 
-__all__ = ["BaseTracker", "WebStreamDebugger"]
+__all__ = ["BaseTracker", "MjpegStreamer"]

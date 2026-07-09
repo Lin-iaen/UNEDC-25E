@@ -14,8 +14,8 @@ import sys
 import time
 from enum import Enum, auto
 
-from src.drivers import BaseCamera, BaseCANMotor
-from src.vision import BaseTracker, WebStreamDebugger
+from src.drivers import Camera, BaseCANMotor
+from src.vision import BaseTracker, MjpegStreamer
 
 logger = logging.getLogger("main")
 
@@ -77,15 +77,19 @@ def main() -> None:
     logger.info("System starting (state=%s)", state.name)
 
     # ── Hardware & module instances (stubs, wired via dependency injection) ──
-    camera: BaseCamera | None = None
+    camera: Camera | None = None
     motor: BaseCANMotor | None = None
     tracker: BaseTracker | None = None
-    debugger = WebStreamDebugger()
+
+    import numpy as np  # noqa: E402 — lazy import for type annotation only
+
+    # Shared buffer: main loop writes, streamer pulls via frame_provider
+    _latest_annotated: np.ndarray | None = None
+    streamer = MjpegStreamer(frame_provider=lambda: _latest_annotated)
+    streamer.start()
+    logger.info("MjpegStreamer started")
 
     try:
-        debugger.start()
-        logger.info("WebStreamDebugger started")
-
         state = State.IDLE
         logger.info("Entering main loop (state=%s)", state.name)
 
@@ -96,15 +100,18 @@ def main() -> None:
                 continue
 
             try:
-                frame = camera.get_frame()
+                frame = camera.read()
             except Exception:
-                logger.exception("Camera get_frame failed")
+                logger.exception("Camera read failed")
                 state = State.ERROR
+                continue
+
+            if frame is None:
                 continue
 
             # ── 2. Vision ──
             result: dict = {}
-            annotated: frame = frame  # fallback: raw frame if no tracker
+            annotated: np.ndarray = frame  # fallback
 
             if tracker is not None:
                 try:
@@ -114,8 +121,8 @@ def main() -> None:
                     state = State.ERROR
                     continue
 
-            # ── 3. Push debug frame to web stream ──
-            debugger.update_frame(annotated)
+            # ── 3. Publish annotated frame for streamer ──
+            _latest_annotated = annotated
 
             # ── 4. State machine ──
             try:
@@ -166,10 +173,10 @@ def main() -> None:
                 logger.exception("Motor disconnect failed")
 
         try:
-            debugger.stop()
-            logger.info("Debugger stopped")
+            streamer.stop()
+            logger.info("Streamer stopped")
         except Exception:
-            logger.exception("Debugger stop failed")
+            logger.exception("Streamer stop failed")
 
         logger.info("System shutdown complete")
 
