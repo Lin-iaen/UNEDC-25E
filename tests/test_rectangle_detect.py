@@ -35,6 +35,7 @@ PARAMS = {
     "MinArea":        500,    # 最小轮廓面积 (px²)
     "MaxAspectRatio": 3.0,    # 最大长宽比（超过视为长条，丢弃）
     "MinContrast":    30,     # 最小对比度差值（白纸灰度 - 胶带灰度）
+    "GlobalThresh":   120,    # 全局二值化阈值（AE 锁定后光照恒定）
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -95,6 +96,11 @@ h3{margin:10px 0 6px;font-size:12px;border-bottom:1px solid #333;padding-bottom:
 <input type="range" id="sl_MinContrast" min="10" max="100"
        oninput="setParam('MinContrast',parseInt(this.value))">
 
+<h3>🧠 二值化</h3>
+<label>阈值 <span class="val" id="v_GlobalThresh">--</span></label>
+<input type="range" id="sl_GlobalThresh" min="0" max="255"
+       oninput="setParam('GlobalThresh',parseInt(this.value))">
+
 <div class="stats">
 帧率: <span id="fps">--</span> FPS<br>
 检测数: <span id="rects">--</span><br>
@@ -107,7 +113,7 @@ h3{margin:10px 0 6px;font-size:12px;border-bottom:1px solid #333;padding-bottom:
 </div>
 
 <script>
-const ALL_KEYS = ["ExposureTime","AnalogueGain","MinArea","MaxAspectRatio","MinContrast"];
+const ALL_KEYS = ["ExposureTime","AnalogueGain","MinArea","MaxAspectRatio","MinContrast","GlobalThresh"];
 // 将 key 的首字母转小写（Python dict key 的格式），因为 /stats 返回的 JSON key 是首字母小写
 function toJsonKey(k){return k.charAt(0).toLowerCase()+k.slice(1);}
 
@@ -215,7 +221,7 @@ def _order_corners(approx: np.ndarray) -> np.ndarray:
     return np.vstack([top, bottom])
 
 
-def process_frame(frame: np.ndarray, params: dict) -> np.ndarray:
+def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int]:
     """
     主检测函数：在一帧上做矩形检测 + 双窗口合成。
     返回合成后的 BGR 帧（检测结果 | 调试视图）。
@@ -227,30 +233,30 @@ def process_frame(frame: np.ndarray, params: dict) -> np.ndarray:
     min_area   = int(params.get("MinArea", 500))
     max_ar     = float(params.get("MaxAspectRatio", 3.0))
     min_contrast = int(params.get("MinContrast", 30))
+    global_thresh = int(params.get("GlobalThresh", 120))
 
-    # ── 梯度边缘检测 ────────────────────────────────────────────────
-    # 放弃所有二值化方案（固定阈值/自适应/OTSU）。
-    # 竞赛场地 77° 视野包含深色地面、白墙、杂物等多峰背景，
-    # 任何基于灰度直方图的方案都会失效。
-    # 
-    # Canny 直接检测“白纸与黑胶带交界处的强烈梯度落差”——
-    # 这是物理世界中绝对不变的特征，不受光照和背景颜色干扰。
+    # ── 全局二值化 ──────────────────────────────────────────────────
+    # AE 锁定后光照归一化，固定阈值稳定可靠。
+    # 产生实心二值区域（非 Canny 的 1px 骨架），确保 findContours
+    # 能形成闭合轮廓，识别率大幅提高。
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
+    _, binary = cv2.threshold(
+        blurred, global_thresh, 255, cv2.THRESH_BINARY_INV,
+    )
 
-    debug_view = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+    debug_view = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
     # detection_view 从原始帧拷贝开始，不加任何预绘——只有检测结果才画
     detection_view = frame.copy()
 
     contours, hierarchy = cv2.findContours(
-        edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE,
+        binary, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE,
     )
 
     # 调试视图：只画所有原始轮廓（灰色细线），不加任何文字
     cv2.drawContours(debug_view, contours, -1, (70, 70, 70), 1)
 
     if hierarchy is None:
-        return _compose_views(detection_view, debug_view, 0)
+        return _compose_views(detection_view, debug_view, 0), 0
 
     hierarchy = hierarchy[0]
     found_pairs: list[tuple[np.ndarray, np.ndarray]] = []
@@ -380,7 +386,14 @@ def main() -> None:
         if frame is None:
             return None
 
-        result, _rect_count = process_frame(frame, PARAMS)
+        try:
+            result, _rect_count = process_frame(frame, PARAMS)
+        except Exception as e:
+            # process_frame 异常 → 回退到原始帧，保证 MJPEG 不断流
+            import traceback
+            traceback.print_exc()
+            result = np.hstack([frame, np.zeros_like(frame)])
+            _rect_count = -1
 
         _frame_count += 1
         now = time.perf_counter()
