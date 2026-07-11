@@ -34,9 +34,8 @@ PARAMS = {
     # 检测过滤参数
     "MinArea":        500,    # 最小轮廓面积 (px²)
     "MaxAspectRatio": 3.0,    # 最大长宽比（超过视为长条，丢弃）
-    "MinWhiteRatio":  0.85,   # 内轮廓灰度均值比例（>此值才算白纸）
-    "ThreshBlock":    31,     # 自适应阈值块大小（必须为奇数）
-    "ThreshC":        3,      # 自适应阈值常数
+    "MinContrast":    30,     # 最小对比度差值（白纸灰度 - 胶带灰度）
+    "GlobalThresh":   120,    # 二值化阈值（0-255）
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -93,18 +92,14 @@ h3{margin:10px 0 6px;font-size:12px;border-bottom:1px solid #333;padding-bottom:
 <input type="range" id="sl_MaxAspectRatio" min="1" max="10" step="0.1"
        oninput="setParam('MaxAspectRatio',parseFloat(this.value))">
 
-<label>最小白底比率 <span class="val" id="v_MinWhiteRatio">--</span></label>
-<input type="range" id="sl_MinWhiteRatio" min="0.3" max="1.0" step="0.01"
-       oninput="setParam('MinWhiteRatio',parseFloat(this.value))">
+<label>最小对比度 <span class="val" id="v_MinContrast">--</span></label>
+<input type="range" id="sl_MinContrast" min="10" max="100"
+       oninput="setParam('MinContrast',parseInt(this.value))">
 
 <h3>🧠 二值化</h3>
-<label>阈值块大小 <span class="val" id="v_ThreshBlock">--</span></label>
-<input type="range" id="sl_ThreshBlock" min="7" max="101" step="2"
-       oninput="setParam('ThreshBlock',parseInt(this.value))">
-
-<label>阈值常数 <span class="val" id="v_ThreshC">--</span></label>
-<input type="range" id="sl_ThreshC" min="-10" max="20"
-       oninput="setParam('ThreshC',parseInt(this.value))">
+<label>阈值 <span class="val" id="v_GlobalThresh">--</span></label>
+<input type="range" id="sl_GlobalThresh" min="0" max="255"
+       oninput="setParam('GlobalThresh',parseInt(this.value))">
 
 <div class="stats">
 帧率: <span id="fps">--</span> FPS<br>
@@ -118,7 +113,7 @@ h3{margin:10px 0 6px;font-size:12px;border-bottom:1px solid #333;padding-bottom:
 </div>
 
 <script>
-const ALL_KEYS = ["ExposureTime","AnalogueGain","MinArea","MaxAspectRatio","MinWhiteRatio","ThreshBlock","ThreshC"];
+const ALL_KEYS = ["ExposureTime","AnalogueGain","MinArea","MaxAspectRatio","MinContrast","GlobalThresh"];
 // 将 key 的首字母转小写（Python dict key 的格式），因为 /stats 返回的 JSON key 是首字母小写
 function toJsonKey(k){return k.charAt(0).toLowerCase()+k.slice(1);}
 
@@ -167,25 +162,46 @@ def _aspect_ratio(cnt: np.ndarray) -> float:
     return max(w / h, h / w)
 
 
-def _interior_white_ratio(gray: np.ndarray, contour: np.ndarray) -> float:
+def _contrast_check(
+    gray: np.ndarray,
+    outer_approx: np.ndarray,
+    inner_approx: np.ndarray,
+) -> float:
     """
-    计算轮廓内部像素灰度均值与 255 的比值。
-    直接用灰度图而非二值化结果——灰度图对光照变化更鲁棒。
-    返回值 ∈ [0, 1]，越接近 1 表示内部越白。
-    """
-    # 创建掩膜：轮廓内部 = 255，外部 = 0
-    mask = np.zeros(gray.shape, dtype=np.uint8)
-    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
+    返回白纸区域与胶带区域的灰度差值（>0 表示白纸更亮）。
 
-    # 只用掩膜区域内的灰度值计算均值
-    # 这是"看起来多此一举"的地方 —— 不用二值化而用原始灰度，
-    # 因为自适应二值化对光照不均极其敏感，会把同一个白纸区域的一半判为黑，
-    # 导致白色比率计算抖动。灰度均值天然对抗这种抖动。
-    total = cv2.countNonZero(mask)
-    if total == 0:
-        return 0.0
-    mean_val = cv2.mean(gray, mask=mask)[0]
-    return mean_val / 255.0
+    性能：先求外轮廓 bounding rect，仅截取这块极小的 ROI 灰度图，
+    然后在该 ROI 上创建 mask 并做均值计算，避免全图级 640×480 内存遍历。
+    对于 200×200 的矩形框，ROI 面积仅为全图的 ~1/7。
+    """
+    # 外轮廓的外接矩形 → ROI 坐标
+    x, y, w, h = cv2.boundingRect(outer_approx)
+    # 像素偏移量 —— 用于将原图坐标平移到 ROI 内部
+    ox, oy = x, y
+
+    # 截取 ROI 灰度块（仅此小块，不是全图）
+    roi_gray = gray[y:y+h, x:x+w]
+
+    # 将轮廓坐标平移到 ROI 局部坐标系
+    outer_local = outer_approx.copy()
+    inner_local = inner_approx.copy()
+    outer_local[:, 0, 0] -= ox  # x
+    outer_local[:, 0, 1] -= oy  # y
+    inner_local[:, 0, 0] -= ox
+    inner_local[:, 0, 1] -= oy
+
+    # 在极小 ROI 上创建 mask —— 内存从 640×480 降到 w×h
+    inner_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(inner_mask, [inner_local], -1, 255, thickness=cv2.FILLED)
+
+    outer_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.drawContours(outer_mask, [outer_local], -1, 255, thickness=cv2.FILLED)
+    tape_mask = cv2.subtract(outer_mask, inner_mask)
+
+    inner_gray = cv2.mean(roi_gray, mask=inner_mask)[0]
+    outer_gray = cv2.mean(roi_gray, mask=tape_mask)[0]
+
+    return inner_gray - outer_gray
 
 
 def _order_corners(approx: np.ndarray) -> np.ndarray:
@@ -216,21 +232,13 @@ def process_frame(frame: np.ndarray, params: dict) -> np.ndarray:
     # ── 解读参数 ──────────────────────────────────────────────────────
     min_area   = int(params.get("MinArea", 500))
     max_ar     = float(params.get("MaxAspectRatio", 3.0))
-    min_white  = float(params.get("MinWhiteRatio", 0.85))
-    block_size = int(params.get("ThreshBlock", 31))
-    thresh_c   = int(params.get("ThreshC", 3))
-
-    # 确保 block_size 是奇数（OpenCV adaptiveThreshold 要求）
-    if block_size % 2 == 0:
-        block_size += 1
+    min_contrast = int(params.get("MinContrast", 30))
+    global_thresh = int(params.get("GlobalThresh", 120))
 
     # ── 二值化 ────────────────────────────────────────────────────────
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    binary = cv2.adaptiveThreshold(
-        blurred, 255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,   # 胶带=黑→255，纸=白→0
-        block_size, thresh_c,
+    _, binary = cv2.threshold(
+        blurred, global_thresh, 255, cv2.THRESH_BINARY_INV,
     )
 
     debug_view = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
@@ -283,10 +291,11 @@ def process_frame(frame: np.ndarray, params: dict) -> np.ndarray:
         if not _is_rectangle(child_approx):
             continue
 
-        # 白色验证
-        white_ratio = _interior_white_ratio(gray, child_approx)
-        if white_ratio < min_white:
-            rejected.append((approx, f"W={white_ratio:.2f}<{min_white}"))
+        # 对比度验证：用原始灰度图计算"白纸 vs 胶带"的灰度差
+        # 低曝光下白纸灰度可能只有 80，但胶带更低，差值仍然显著
+        contrast = _contrast_check(gray, approx, child_approx)
+        if contrast <= min_contrast:
+            rejected.append((approx, f"C={contrast:.0f}<{min_contrast}"))
             continue
 
         found_pairs.append((approx, child_approx))
@@ -311,7 +320,7 @@ def process_frame(frame: np.ndarray, params: dict) -> np.ndarray:
         cv2.line(detection_view, tuple(ordered[1]), tuple(ordered[3]),
                  CLR_DIAG, 2)
 
-    return _compose_views(detection_view, debug_view, len(found_pairs))
+    return _compose_views(detection_view, debug_view, len(found_pairs)), len(found_pairs)
 
 
 def _compose_views(
@@ -374,7 +383,7 @@ def main() -> None:
         if frame is None:
             return None
 
-        result = process_frame(frame, PARAMS)
+        result, _rect_count = process_frame(frame, PARAMS)
 
         _frame_count += 1
         now = time.perf_counter()
