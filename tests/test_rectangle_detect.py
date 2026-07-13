@@ -351,6 +351,7 @@ _frame_count = 0
 _fps = 0.0
 _last_ts = time.perf_counter()
 _rect_count = 0
+_ae_active = False   # True 表示 AE 正在自动调节，需从 metadata 同步参数
 
 
 def main() -> None:
@@ -381,10 +382,19 @@ def main() -> None:
         print("Warning: could not read AE metadata, using defaults")
 
     def frame_provider() -> np.ndarray | None:
-        global _frame_count, _fps, _last_ts, _rect_count
+        global _frame_count, _fps, _last_ts, _rect_count, _ae_active
         frame = cam.read()
         if frame is None:
             return None
+
+        # AE 激活时从 metadata 实时同步曝光/增益到 UI 参数
+        if _ae_active:
+            try:
+                metadata = cam._cam.capture_metadata()
+                PARAMS["ExposureTime"] = metadata.get("ExposureTime", 20000)
+                PARAMS["AnalogueGain"] = metadata.get("AnalogueGain", 1.0)
+            except Exception:
+                pass
 
         try:
             result, _rect_count = process_frame(frame, PARAMS)
@@ -451,6 +461,7 @@ def _make_route_set(cam: Camera):
     """处理 /set?key=value，更新 PARAMS，相机参数同步到硬件"""
     from flask import jsonify, request
     def handler(**kwargs):
+        global _ae_active
         for key in request.args:
             raw = request.args[key]
             # 尝试转数字
@@ -470,6 +481,7 @@ def _make_route_set(cam: Camera):
                 # 相机参数同步到硬件
                 if matched in ("ExposureTime", "AnalogueGain"):
                     cam.set_params({matched: val})
+                    _ae_active = False  # 手动调参 → 退出 AE 模式
         return jsonify({"ok": True})
     return handler
 
@@ -478,8 +490,17 @@ def _make_route_reset_ae(cam: Camera):
     """恢复自动曝光：解除 ExposureTime 和 AnalogueGain 手动锁定"""
     from flask import jsonify
     def handler(**kwargs):
+        global _ae_active
         # 让 ISP 重新接管曝光和增益
         cam.set_params({"AeEnable": True})
+        _ae_active = True
+        # 立即回读实际值同步到 UI 参数
+        try:
+            metadata = cam._cam.capture_metadata()
+            PARAMS["ExposureTime"] = metadata.get("ExposureTime", 20000)
+            PARAMS["AnalogueGain"] = metadata.get("AnalogueGain", 1.0)
+        except Exception:
+            pass
         print("AE re-enabled")
         return jsonify({"ok": True})
     return handler
