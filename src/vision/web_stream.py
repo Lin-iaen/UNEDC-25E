@@ -28,7 +28,7 @@ from typing import Any, Callable
 
 import cv2
 import numpy as np
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, make_response, render_template_string
 
 logger = logging.getLogger("vision.web_stream")
 
@@ -117,7 +117,9 @@ class MjpegStreamer:
 
         @self._app.route("/")
         def index():
-            return render_template_string(self._template)
+            response = make_response(render_template_string(self._template))
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            return response
 
         @self._app.route("/video_feed")
         def video_feed():

@@ -83,6 +83,7 @@ input[type=range]{width:100%}
 input[type=text]{background:#333;border:1px solid #555;color:#fff;padding:2px 4px;font-size:10px;width:100px}
 </style></head><body>
 <div id="panel">
+<div id="js_status" style="color:#f80;font-size:10px;margin-bottom:4px">JS loading...</div>
 <div class="stat"><span class="l">矩形</span><span class="v" id="s_rects">--</span></div>
 <div class="stat"><span class="l">FPS</span><span class="v" id="stat_fps">--</span></div>
 
@@ -143,17 +144,28 @@ function setParam(name,v){
   fetch('/set?'+toKey(name)+'='+v);
 }
 function poll(){
-  fetch('/stats').then(r=>r.json()).then(function(d){
-    ALL_KEYS.forEach(function(k){
-      var jk=toKey(k); var v=d[jk];
-      if(v!==undefined && v!==null){
-        document.getElementById('v_'+k).textContent=v;
-        document.getElementById('sl_'+k).value=v;
-      }
+  var ts = '?_=' + Date.now();
+  fetch('/stats' + ts)
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      document.getElementById('js_status').textContent = 'OK: '+d.rects+'r '+d.fps+'fps';
+      ALL_KEYS.forEach(function(k){
+        var jk=toKey(k); var v=d[jk];
+        if(v!==undefined && v!==null){
+          var elV = document.getElementById('v_'+k);
+          var elS = document.getElementById('sl_'+k);
+          if(elV) elV.textContent = v;
+          if(elS) elS.value = v;
+        }
+      });
+      var elFps = document.getElementById('stat_fps');
+      var elR = document.getElementById('s_rects');
+      if(elFps) elFps.textContent = d.fps;
+      if(elR) elR.textContent = d.rects;
+    })
+    .catch(function(e){
+      document.getElementById('js_status').textContent = 'ERR: '+e;
     });
-    document.getElementById('stat_fps').textContent=d.fps;
-    document.getElementById('s_rects').textContent=d.rects;
-  });
 }
 function refreshPresets(){
   fetch('/presets').then(r=>r.json()).then(function(d){
