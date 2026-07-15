@@ -267,6 +267,11 @@ def _draw_crosshair(img, cx, cy, size=10, color=(0,255,255), thickness=1):
 
 def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int, dict]:
     h, w = frame.shape[:2]
+    TARGET_W, TARGET_H = 640, 360
+    if w != TARGET_W or h != TARGET_H:
+        frame = cv2.resize(frame, (TARGET_W, TARGET_H))
+        h, w = TARGET_H, TARGET_W
+
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     min_area   = int(params.get("MinArea", 500))
@@ -352,7 +357,16 @@ def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int, dic
 
 
 def _compose_views(detection, debug, rect_count, error) -> np.ndarray:
-    combined = np.hstack([detection, debug])
+    h, w = detection.shape[:2]
+    pip_w, pip_h = w // 4, h // 4
+    debug_small = cv2.resize(debug, (pip_w, pip_h))
+    result = detection.copy()
+    rx, ry = w - pip_w - 8, h - pip_h - 8
+    result[ry:ry + pip_h, rx:rx + pip_w] = debug_small
+    cv2.rectangle(result, (rx - 1, ry - 1), (rx + pip_w, ry + pip_h), (0, 255, 0), 1)
+    label = "BINARY"
+    cv2.putText(result, label, (rx + 3, ry - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1, cv2.LINE_AA)
+
     if error["tracking"]:
         text = f"TRACK ✓ d:{error['distance']}"
         colour = CLR_OK
@@ -362,9 +376,9 @@ def _compose_views(detection, debug, rect_count, error) -> np.ndarray:
     else:
         text = f"R:{rect_count}"
         colour = (0, 0, 255)
-    cv2.putText(combined, text, (8, 26),
+    cv2.putText(result, text, (8, 26),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2, cv2.LINE_AA)
-    return combined
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -478,7 +492,7 @@ _rect_count = 0
 def main() -> None:
     global _frame_count, _fps, _last_ts, _latest_error, _rect_count
 
-    cam = Camera(vflip=True)
+    cam = Camera(vflip=True, sensor_size=(1280, 720))
     cam.start()
 
     time.sleep(1.5)
@@ -500,7 +514,8 @@ def main() -> None:
             result, _rect_count, _latest_error = process_frame(frame, PARAMS)
         except Exception:
             import traceback; traceback.print_exc()
-            result = np.hstack([frame, np.zeros_like(frame)])
+            result = np.zeros((360, 640, 3), dtype=np.uint8)
+            cv2.putText(result, "ERROR", (200, 190), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
             _rect_count = -1
         _frame_count += 1
         now = time.perf_counter()

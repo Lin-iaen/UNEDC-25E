@@ -44,6 +44,7 @@ class Camera:
         analogue_gain: float = DEFAULT_ANALOGUE_GAIN,
         brightness: float = DEFAULT_BRIGHTNESS,
         contrast: float = DEFAULT_CONTRAST,
+        sensor_size: tuple[int, int] | None = None,
     ) -> None:
         self._vflip = vflip
         self._hflip = hflip
@@ -51,6 +52,7 @@ class Camera:
         self._analogue_gain = analogue_gain
         self._brightness = brightness
         self._contrast = contrast
+        self._sensor_size = sensor_size
 
         self._cam: Picamera2 | None = None
         self._thread: threading.Thread | None = None
@@ -67,7 +69,12 @@ class Camera:
             return
 
         self._cam = Picamera2()
-        cfg = self._cam.create_preview_configuration()
+        if self._sensor_size:
+            cfg = self._cam.create_preview_configuration(
+                sensor={"output_size": self._sensor_size}
+            )
+        else:
+            cfg = self._cam.create_preview_configuration()
         self._cam.configure(cfg)
 
         # Cache sensor modes AFTER configure, BEFORE start
