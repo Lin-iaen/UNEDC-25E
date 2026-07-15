@@ -267,10 +267,15 @@ def _draw_crosshair(img, cx, cy, size=10, color=(0,255,255), thickness=1):
 
 def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int, dict]:
     h, w = frame.shape[:2]
-    TARGET_W, TARGET_H = 640, 360
-    if w != TARGET_W or h != TARGET_H:
-        frame = cv2.resize(frame, (TARGET_W, TARGET_H))
-        h, w = TARGET_H, TARGET_W
+    input_w, input_h = w, h
+    MAX_W, MAX_H = 640, 480
+    if w > MAX_W or h > MAX_H:
+        scale = min(MAX_W / w, MAX_H / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        frame = cv2.resize(frame, (new_w, new_h))
+        h, w = new_h, new_w
+    if _frame_count == 0:
+        print(f"Camera output: {input_w}x{input_h} → processing: {w}x{h}")
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 

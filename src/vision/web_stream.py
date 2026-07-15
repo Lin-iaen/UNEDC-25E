@@ -156,7 +156,7 @@ class MjpegStreamer:
                 b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
             )
-            time.sleep(0.03)  # ~30 fps ceiling
+            time.sleep(0.01)  # ~100 fps ceiling
 
     def _serve(self) -> None:
         """Internal: block on ``app.run()`` until ``_running`` is cleared."""
