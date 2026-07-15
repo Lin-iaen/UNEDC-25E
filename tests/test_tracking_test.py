@@ -141,52 +141,74 @@ const ALL_SLIDERS = [1,1,1,1,1,1,1,1,1,1,1,1]; // all have sliders
 function toKey(k){return k.charAt(0).toLowerCase()+k.slice(1);}
 function setParam(name,v){
   document.getElementById('v_'+name).textContent=v;
-  fetch('/set?'+toKey(name)+'='+v);
+  document.getElementById('sl_'+name).value=v;
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/set?'+toKey(name)+'='+v, false);
+  xhr.send();
 }
 function poll(){
-  var ts = '?_=' + Date.now();
-  fetch('/stats' + ts)
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      document.getElementById('js_status').textContent = 'OK: '+d.rects+'r '+d.fps+'fps';
-      ALL_KEYS.forEach(function(k){
-        var jk=toKey(k); var v=d[jk];
-        if(v!==undefined && v!==null){
-          var elV = document.getElementById('v_'+k);
-          var elS = document.getElementById('sl_'+k);
-          if(elV) elV.textContent = v;
-          if(elS) elS.value = v;
-        }
-      });
-      var elFps = document.getElementById('stat_fps');
-      var elR = document.getElementById('s_rects');
-      if(elFps) elFps.textContent = d.fps;
-      if(elR) elR.textContent = d.rects;
-    })
-    .catch(function(e){
-      document.getElementById('js_status').textContent = 'ERR: '+e;
+  document.getElementById('js_status').textContent = 'JS polling...';
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', '/stats?_='+Date.now(), false);
+  try {
+    xhr.send();
+    var d = JSON.parse(xhr.responseText);
+    document.getElementById('js_status').textContent = 'OK: '+d.rects+'r '+d.fps+'fps';
+    ALL_KEYS.forEach(function(k){
+      var jk=toKey(k); var v=d[jk];
+      if(v!==undefined && v!==null){
+        var elV = document.getElementById('v_'+k);
+        var elS = document.getElementById('sl_'+k);
+        if(elV) elV.textContent = v;
+        if(elS) elS.value = v;
+      }
     });
+    var elFps = document.getElementById('stat_fps');
+    var elR = document.getElementById('s_rects');
+    if(elFps) elFps.textContent = d.fps;
+    if(elR) elR.textContent = d.rects;
+  } catch(e) {
+    document.getElementById('js_status').textContent = 'ERR: '+e;
+  }
 }
 function refreshPresets(){
-  fetch('/presets').then(r=>r.json()).then(function(d){
-    var html='';
-    d.presets.forEach(function(p){
-      html+='<span class="preset-link" onclick="loadPreset(\''+p+'\')">'+p+'</span>';
-    });
-    document.getElementById('preset_list').innerHTML=html||'--';
-  });
+  var xhr = new XMLHttpRequest();
+  xhr.onreadystatechange = function(){
+    if(xhr.readyState==4 && xhr.status==200){
+      var d = JSON.parse(xhr.responseText);
+      var html = '';
+      d.presets.forEach(function(p){
+        html += '<span class=\"preset-link\" onclick=\"loadPreset(\\''+p+'\\')\">'+p+'</span>';
+      });
+      document.getElementById('preset_list').innerHTML = html || '--';
+    }
+  };
+  xhr.open('GET', '/presets', true);
+  xhr.send();
 }
 function savePreset(){
-  var name=document.getElementById('preset_name').value||'my_preset';
-  fetch('/save?name='+name).then(r=>r.json()).then(function(d){
-    if(d.ok) refreshPresets();
-  });
+  var name = document.getElementById('preset_name').value || 'my_preset';
+  var xhr = new XMLHttpRequest();
+  xhr.onreadystatechange = function(){
+    if(xhr.readyState==4 && xhr.status==200){
+      var d = JSON.parse(xhr.responseText);
+      if(d.ok) refreshPresets();
+    }
+  };
+  xhr.open('GET', '/save?name='+name, true);
+  xhr.send();
 }
 function loadPreset(name){
-  var n=name||document.getElementById('preset_name').value||'default';
-  fetch('/load?name='+n).then(r=>r.json()).then(function(d){
-    if(d.ok){ poll(); refreshPresets(); }
-  });
+  var n = name || document.getElementById('preset_name').value || 'default';
+  var xhr = new XMLHttpRequest();
+  xhr.onreadystatechange = function(){
+    if(xhr.readyState==4 && xhr.status==200){
+      var d = JSON.parse(xhr.responseText);
+      if(d.ok){ poll(); refreshPresets(); }
+    }
+  };
+  xhr.open('GET', '/load?name='+n, true);
+  xhr.send();
 }
 
 poll();
