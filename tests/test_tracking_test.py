@@ -336,7 +336,7 @@ def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int, dic
         dx = rect_cx - frame_cx
         dy = rect_cy - frame_cy
         dist = np.sqrt(dx**2 + dy**2)
-        tracking = dist <= track_thresh
+        tracking = bool(dist <= track_thresh)
         error = {"dx": dx, "dy": dy, "distance": round(dist, 1),
                  "tracking": tracking, "rect_center_x": rect_cx, "rect_center_y": rect_cy}
         mid_x = (frame_cx + rect_cx) // 2
