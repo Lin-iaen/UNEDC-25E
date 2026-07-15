@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-追踪误差调试脚本
-================
+全参数调试 + 追踪误差测试
+=========================
 
-基于矩形检测管线，当检测到目标后进入误差分析：
-- 计算画面中心与矩形对角线中心的偏差 (Δx, Δy, d)
-- d < TrackingThreshold 时视为追踪成功，误差归零
-- 十字线 + 连接线直观显示偏差方向和距离
+覆盖硬件参数（曝光/增益/亮度/对比度/饱和度/锐度/EV）、检测过滤参数、
+二值化参数、追踪参数。支持预设保存/加载。
+
+用法：
+    python tests/test_tracking_test.py
+    → 打开 http://<pi-ip>:5000
 """
 
+import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -25,49 +29,81 @@ from src.vision import MjpegStreamer
 # 参数
 # ══════════════════════════════════════════════════════════════════════════════
 
-PARAMS = {
+CAMERA_PARAMS = {  # 会通过 cam._cam.capture_metadata() 同步到硬件
     "ExposureTime": 20000,
     "AnalogueGain": 1.0,
+    "Brightness":    0.0,
+    "Contrast":      1.0,
+    "Saturation":    1.0,
+    "Sharpness":     1.0,
+    "ExposureValue": 0.0,
+}
+DETECT_PARAMS = {   # 纯软件参数，不接触硬件
     "MinArea":        500,
     "MaxAspectRatio": 3.0,
     "MinContrast":    30,
-    "GlobalThresh":   120,
-    "TrackingThreshold": 20,   # 像素，低于此值视为追踪成功
 }
+BINARY_PARAMS = {
+    "GlobalThresh": 120,
+}
+TRACK_PARAMS = {
+    "TrackingThreshold": 20,
+}
+PARAMS = {**CAMERA_PARAMS, **DETECT_PARAMS, **BINARY_PARAMS, **TRACK_PARAMS}
 
-CLR_OUTER   = (0, 255, 0)     # 绿 —— 外轮廓
-CLR_INNER   = (255, 0, 0)     # 蓝 —— 内轮廓
-CLR_DIAG    = (0, 0, 255)     # 红 —— 对角线
-CLR_CENTER  = (0, 255, 255)   # 黄 —— 画面中心十字
-CLR_RECT    = (255, 255, 0)   # 青 —— 矩形中心十字
-CLR_LINE    = (255, 255, 255) # 白 —— 偏差连接线
-CLR_REJECT  = (80, 80, 80)    # 灰 —— 被过滤轮廓
+PRESETS_DIR = Path(__file__).resolve().parent.parent / "calibration_data"
+
+CLR_OUTER   = (0, 255, 0)
+CLR_INNER   = (255, 0, 0)
+CLR_DIAG    = (0, 0, 255)
+CLR_CENTER  = (0, 255, 255)
+CLR_RECT    = (255, 255, 0)
+CLR_LINE    = (255, 255, 255)
+CLR_REJECT  = (80, 80, 80)
 CLR_REJ_TXT = (200, 200, 200)
-CLR_OK      = (0, 255, 0)     # 追踪成功
+CLR_OK      = (0, 255, 0)
 CLR_FAIL    = (0, 0, 255)
 
 HTML_PAGE = """<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Tracking Test</title>
+<html><head><meta charset="utf-8"><title>Tracking</title>
 <style>
 body{margin:0;font-family:monospace;background:#111;color:#ccc;display:flex;height:100vh}
-#panel{width:320px;padding:10px;background:#1a1a1a;border-right:1px solid #333}
+#panel{width:320px;overflow-y:auto;padding:10px;background:#1a1a1a;border-right:1px solid #333}
 #main{flex:1;display:flex;align-items:center;justify-content:center;padding:4px}
 img{max-width:100%;max-height:100%}
 h3{margin:10px 0 6px;font-size:12px;border-bottom:1px solid #333;padding-bottom:3px}
-.stats{font-size:10px;color:#666;margin-top:8px}
 .stat{display:flex;justify-content:space-between;margin:2px 0;font-size:11px}
 .stat .l{color:#aaa}.stat .v{color:#0f0;font-weight:bold}
 label{display:block;margin:6px 0 2px;font-size:11px;color:#aaa}
 input[type=range]{width:100%}
-.btn{display:inline-block;margin:2px;padding:3px 8px;background:#333;color:#fff;
-     border:1px solid #555;cursor:pointer;font-size:10px;text-decoration:none}
+.btn{display:inline-block;margin:2px;padding:3px 8px;background:#333;color:#fff;border:1px solid #555;cursor:pointer;font-size:10px;text-decoration:none}
 .btn:hover{background:#555}
+.preset-list{font-size:10px;color:#666;margin:4px 0}
+.preset-link{color:#0f0;cursor:pointer;margin:0 4px}
+input[type=text]{background:#333;border:1px solid #555;color:#fff;padding:2px 4px;font-size:10px;width:100px}
 </style></head><body>
 <div id="panel">
-<div class="stat"><span class="l">矩形数</span><span class="v" id="s_rects">--</span></div>
+<div class="stat"><span class="l">矩形</span><span class="v" id="s_rects">--</span></div>
 <div class="stat"><span class="l">FPS</span><span class="v" id="stat_fps">--</span></div>
 
-<h3>📷 检测</h3>
+<h3>📷 相机参数</h3>
+<label>曝光 <span class="val" id="v_ExposureTime">--</span></label>
+<input type="range" id="sl_ExposureTime" min="39" max="66666" oninput="setParam('ExposureTime',parseInt(this.value))">
+<label>增益 <span class="val" id="v_AnalogueGain">--</span></label>
+<input type="range" id="sl_AnalogueGain" min="1" max="16" step="0.1" oninput="setParam('AnalogueGain',parseFloat(this.value))">
+<label>亮度 <span class="val" id="v_Brightness">--</span></label>
+<input type="range" id="sl_Brightness" min="-1" max="1" step="0.05" oninput="setParam('Brightness',parseFloat(this.value))">
+<label>对比度 <span class="val" id="v_Contrast">--</span></label>
+<input type="range" id="sl_Contrast" min="0" max="32" step="0.1" oninput="setParam('Contrast',parseFloat(this.value))">
+<label>饱和度 <span class="val" id="v_Saturation">--</span></label>
+<input type="range" id="sl_Saturation" min="0" max="32" step="0.1" oninput="setParam('Saturation',parseFloat(this.value))">
+<label>锐度 <span class="val" id="v_Sharpness">--</span></label>
+<input type="range" id="sl_Sharpness" min="0" max="16" step="0.1" oninput="setParam('Sharpness',parseFloat(this.value))">
+<label>EV补偿 <span class="val" id="v_ExposureValue">--</span></label>
+<input type="range" id="sl_ExposureValue" min="-4" max="4" step="0.5" oninput="setParam('ExposureValue',parseFloat(this.value))">
+<a class="btn" href="/reset_ae">↻ 恢复自动曝光</a>
+
+<h3>🔍 检测</h3>
 <label>最小面积 <span class="val" id="v_MinArea">--</span></label>
 <input type="range" id="sl_MinArea" min="100" max="10000" oninput="setParam('MinArea',parseInt(this.value))">
 <label>最大长宽比 <span class="val" id="v_MaxAspectRatio">--</span></label>
@@ -83,13 +119,24 @@ input[type=range]{width:100%}
 <label>追踪阈值 <span class="val" id="v_TrackingThreshold">--</span> px</label>
 <input type="range" id="sl_TrackingThreshold" min="5" max="100" oninput="setParam('TrackingThreshold',parseInt(this.value))">
 
+<h3>💾 预设</h3>
+<input type="text" id="preset_name" placeholder="预设名">
+<button class="btn" onclick="savePreset()">保存</button>
+<button class="btn" onclick="loadPreset()">加载</button>
+<div class="preset-list">已有: <span id="preset_list"></span></div>
 
 </div>
 <div id="main">
 <img src="/video_feed" id="stream">
 </div>
 <script>
-const ALL_KEYS = ["ExposureTime","AnalogueGain","MinArea","MaxAspectRatio","MinContrast","GlobalThresh","TrackingThreshold"];
+const ALL_KEYS = [
+  "ExposureTime","AnalogueGain","Brightness","Contrast","Saturation","Sharpness",
+  "ExposureValue","MinArea","MaxAspectRatio","MinContrast",
+  "GlobalThresh","TrackingThreshold"
+];
+const ALL_SLIDERS = [1,1,1,1,1,1,1,1,1,1,1,1]; // all have sliders
+
 function toKey(k){return k.charAt(0).toLowerCase()+k.slice(1);}
 function setParam(name,v){
   document.getElementById('v_'+name).textContent=v;
@@ -108,14 +155,37 @@ function poll(){
     document.getElementById('s_rects').textContent=d.rects;
   });
 }
+function refreshPresets(){
+  fetch('/presets').then(r=>r.json()).then(function(d){
+    var html='';
+    d.presets.forEach(function(p){
+      html+='<span class="preset-link" onclick="loadPreset(\''+p+'\')">'+p+'</span>';
+    });
+    document.getElementById('preset_list').innerHTML=html||'--';
+  });
+}
+function savePreset(){
+  var name=document.getElementById('preset_name').value||'my_preset';
+  fetch('/save?name='+name).then(r=>r.json()).then(function(d){
+    if(d.ok) refreshPresets();
+  });
+}
+function loadPreset(name){
+  var n=name||document.getElementById('preset_name').value||'default';
+  fetch('/load?name='+n).then(r=>r.json()).then(function(d){
+    if(d.ok){ poll(); refreshPresets(); }
+  });
+}
+
 poll();
-setInterval(poll, 1000);
+refreshPresets();
+setInterval(poll, 2000);
 </script>
 </body></html>"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 辅助函数
+# 检测辅助（与 detect 版一致）
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _is_rectangle(approx: np.ndarray) -> bool:
@@ -148,32 +218,20 @@ def _order_corners(approx):
     return np.vstack([top, bottom])
 
 def _center_of(ordered: np.ndarray) -> tuple[int, int]:
-    """返回有序四边形的对角线交点（即中心）。"""
     cx = (ordered[0,0] + ordered[1,0] + ordered[2,0] + ordered[3,0]) // 4
     cy = (ordered[0,1] + ordered[1,1] + ordered[2,1] + ordered[3,1]) // 4
     return int(cx), int(cy)
 
 def _draw_crosshair(img, cx, cy, size=10, color=(0,255,255), thickness=1):
-    """在 (cx,cy) 处画十字线。"""
-    h, w = img.shape[:2]
     cv2.line(img, (cx - size, cy), (cx + size, cy), color, thickness)
     cv2.line(img, (cx, cy - size), (cx, cy + size), color, thickness)
-    # 画小圆点标记中心
     cv2.circle(img, (cx, cy), 2, color, -1)
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-# 主处理函数
+# 处理
 # ══════════════════════════════════════════════════════════════════════════════
 
 def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int, dict]:
-    """
-    返回 (composed_image, rect_count, error_state)
-    error_state = {
-        "dx": int, "dy": int, "distance": float,
-        "tracking": bool, "rect_center_x": int, "rect_center_y": int
-    }
-    """
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -183,13 +241,11 @@ def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int, dic
     global_thresh = int(params.get("GlobalThresh", 120))
     track_thresh  = int(params.get("TrackingThreshold", 20))
 
-    # 二值化
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     _, binary = cv2.threshold(blurred, global_thresh, 255, cv2.THRESH_BINARY_INV)
 
     debug_view = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
     detection_view = frame.copy()
-    # 在检测视图上画固定画面中心十字
     frame_cx, frame_cy = w // 2, h // 2
     _draw_crosshair(detection_view, frame_cx, frame_cy, 12, CLR_CENTER, 2)
 
@@ -208,35 +264,26 @@ def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int, dic
 
     for idx, (cnt, hinfo) in enumerate(zip(contours, hierarchy)):
         area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
+        if area < min_area: continue
         epsilon = 0.02 * cv2.arcLength(cnt, True)
         approx = cv2.approxPolyDP(cnt, epsilon, True)
-        if not _is_rectangle(approx):
-            continue
+        if not _is_rectangle(approx): continue
         ar = _aspect_ratio(approx)
         if ar > max_ar:
-            rejected.append((approx, f"AR={ar:.1f}>{max_ar}"))
+            rejected.append((approx, f"AR={ar:.1f}"))
             continue
         child_idx = hinfo[2]
-        if child_idx == -1:
-            continue
+        if child_idx == -1: continue
         child_cnt = contours[child_idx]
         child_epsilon = 0.02 * cv2.arcLength(child_cnt, True)
         child_approx = cv2.approxPolyDP(child_cnt, child_epsilon, True)
-        if not _is_rectangle(child_approx):
-            continue
-        child_ar = _aspect_ratio(child_approx)
-        if child_ar > max_ar:
-            rejected.append((approx, f"AR={child_ar:.1f}>{max_ar}"))
-            continue
+        if not _is_rectangle(child_approx): continue
         contrast = _contrast_check(gray, approx, child_approx)
         if contrast <= min_contrast:
-            rejected.append((approx, f"C={contrast:.0f}<{min_contrast}"))
+            rejected.append((approx, f"C={contrast:.0f}"))
             continue
         found_pairs.append((approx, child_approx))
 
-    # 绘制
     for cnt, reason in rejected:
         cv2.drawContours(detection_view, [cnt], -1, CLR_REJECT, 2)
         rx, ry, rw, rh = cv2.boundingRect(cnt)
@@ -249,74 +296,54 @@ def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int, dic
         ordered = _order_corners(inner)
         cv2.line(detection_view, tuple(ordered[0]), tuple(ordered[2]), CLR_DIAG, 2)
         cv2.line(detection_view, tuple(ordered[1]), tuple(ordered[3]), CLR_DIAG, 2)
-
-        # 矩形中心
         rect_cx, rect_cy = _center_of(ordered)
         _draw_crosshair(detection_view, rect_cx, rect_cy, 10, CLR_RECT, 2)
-
-        # 偏差连接线
         cv2.line(detection_view, (frame_cx, frame_cy), (rect_cx, rect_cy), CLR_LINE, 1)
-
-        # 误差计算
         dx = rect_cx - frame_cx
         dy = rect_cy - frame_cy
         dist = np.sqrt(dx**2 + dy**2)
         tracking = dist <= track_thresh
-
-        error = {
-            "dx": dx, "dy": dy, "distance": round(dist, 1),
-            "tracking": tracking,
-            "rect_center_x": rect_cx, "rect_center_y": rect_cy,
-        }
-
-        # 在连接线上标注偏差值
+        error = {"dx": dx, "dy": dy, "distance": round(dist, 1),
+                 "tracking": tracking, "rect_center_x": rect_cx, "rect_center_y": rect_cy}
         mid_x = (frame_cx + rect_cx) // 2
         mid_y = (frame_cy + rect_cy) // 2
-        label = f"Δx:{dx:+d} Δy:{dy:+d}"
         if tracking:
-            label = "TRACK ✓"
-            cv2.putText(detection_view, label, (mid_x - 30, mid_y - 6),
+            cv2.putText(detection_view, "TRACK ✓", (mid_x - 30, mid_y - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, CLR_OK, 2, cv2.LINE_AA)
         else:
-            cv2.putText(detection_view, label, (mid_x - 30, mid_y - 6),
+            cv2.putText(detection_view, f"dx:{dx:+d} dy:{dy:+d}", (mid_x - 30, mid_y - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, CLR_LINE, 1, cv2.LINE_AA)
 
-    composed = _compose_views(detection_view, debug_view, len(found_pairs), error)
-    return composed, len(found_pairs), error
+    return _compose_views(detection_view, debug_view, len(found_pairs), error), len(found_pairs), error
 
 
 def _compose_views(detection, debug, rect_count, error) -> np.ndarray:
-    """并排合成，左上角显示追踪状态。"""
     combined = np.hstack([detection, debug])
-    h, w = combined.shape[:2]
-
     if error["tracking"]:
-        text = f"TRACK ✓  d:{error['distance']}"
+        text = f"TRACK ✓ d:{error['distance']}"
         colour = CLR_OK
     elif rect_count > 0:
-        text = f"Δx:{error['dx']:+d} Δy:{error['dy']:+d} d:{error['distance']}"
+        text = f"dx:{error['dx']:+d} dy:{error['dy']:+d} d:{error['distance']}"
         colour = CLR_FAIL
     else:
         text = f"R:{rect_count}"
         colour = (0, 0, 255)
-
     cv2.putText(combined, text, (8, 26),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2, cv2.LINE_AA)
     return combined
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 路由工厂
+# 路由
 # ══════════════════════════════════════════════════════════════════════════════
 
 def make_route_stats():
     from flask import jsonify
-    import datetime
     def handler(**kwargs):
         return jsonify({
             "fps": round(_fps, 1),
             "rects": _rect_count,
-            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            "time": datetime.now().strftime("%H:%M:%S"),
             "dx": _latest_error["dx"],
             "dy": _latest_error["dy"],
             "distance": _latest_error["distance"],
@@ -336,13 +363,10 @@ def make_route_set(cam: Camera):
                 val = int(val) if val == int(val) and "." not in raw else val
             except ValueError:
                 continue
-            matched = None
-            for pk in PARAMS:
-                if pk.lower() == key.lower():
-                    matched = pk; break
+            matched = next((pk for pk in PARAMS if pk.lower() == key.lower()), None)
             if matched:
                 PARAMS[matched] = val
-                if matched in ("ExposureTime", "AnalogueGain"):
+                if matched in CAMERA_PARAMS:
                     cam.set_params({matched: val})
         return jsonify({"ok": True})
     return handler
@@ -352,13 +376,61 @@ def make_route_reset_ae(cam: Camera):
     from flask import jsonify
     def handler(**kwargs):
         cam.set_params({"AeEnable": True})
+        try:
+            md = cam._cam.capture_metadata()
+            PARAMS["ExposureTime"] = md.get("ExposureTime", 20000)
+            PARAMS["AnalogueGain"] = md.get("AnalogueGain", 1.0)
+        except Exception:
+            pass
         print("AE re-enabled")
         return jsonify({"ok": True})
     return handler
 
 
+def make_route_save():
+    from flask import jsonify, request
+    def handler(**kwargs):
+        name = request.args.get("name", "my_preset")
+        path = PRESETS_DIR / f"{name}.json"
+        PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+        payload = dict(PARAMS)
+        payload["_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        print(f"Preset saved: {path}")
+        return jsonify({"ok": True, "path": str(path)})
+    return handler
+
+
+def make_route_load(cam: Camera):
+    from flask import jsonify, request
+    def handler(**kwargs):
+        name = request.args.get("name", "default")
+        path = PRESETS_DIR / f"{name}.json"
+        if not path.exists():
+            return jsonify({"ok": False, "error": f"{name}.json not found"}), 404
+        data = json.loads(path.read_text())
+        for k, v in data.items():
+            if k.startswith("_"): continue
+            if k in PARAMS:
+                PARAMS[k] = v
+                if k in CAMERA_PARAMS:
+                    cam.set_params({k: v})
+        print(f"Preset loaded: {path}")
+        return jsonify({"ok": True, "name": name})
+    return handler
+
+
+def make_route_presets():
+    from flask import jsonify
+    def handler(**kwargs):
+        PRESETS_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(p.stem for p in PRESETS_DIR.glob("*.json"))
+        return jsonify({"presets": files})
+    return handler
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# 主程序
+# 入口
 # ══════════════════════════════════════════════════════════════════════════════
 
 _frame_count = 0
@@ -380,8 +452,6 @@ def main() -> None:
         md = cam._cam.capture_metadata()
         PARAMS["ExposureTime"] = md.get("ExposureTime", 20000)
         PARAMS["AnalogueGain"] = md.get("AnalogueGain", 1.0)
-        cam.set_params({"ExposureTime": PARAMS["ExposureTime"],
-                        "AnalogueGain": PARAMS["AnalogueGain"]})
         print(f"AE locked: Expo={PARAMS['ExposureTime']}us, "
               f"Gain={PARAMS['AnalogueGain']:.2f}x")
     except Exception:
@@ -410,9 +480,12 @@ def main() -> None:
         port=5000,
         custom_template=HTML_PAGE,
         custom_routes={
-            "/stats":     make_route_stats(),
-            "/set":       make_route_set(cam),
-            "/reset_ae":   make_route_reset_ae(cam),
+            "/stats":    make_route_stats(),
+            "/set":      make_route_set(cam),
+            "/reset_ae": make_route_reset_ae(cam),
+            "/save":     make_route_save(),
+            "/load":     make_route_load(cam),
+            "/presets":  make_route_presets(),
         },
     )
     streamer.start()
@@ -423,7 +496,6 @@ def main() -> None:
             time.sleep(1)
     except KeyboardInterrupt:
         print("Shutting down ...")
-
     streamer.stop()
     cam.release()
 
