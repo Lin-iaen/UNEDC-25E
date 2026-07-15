@@ -45,21 +45,23 @@
 ```bash
 source venv/bin/activate
 
-# Quick capture / burst / stream
-python src/camera_demo.py --capture           # still photo (full res + BGR)
-python src/camera_demo.py --capture --vflip   #   with vertical flip
+# Quick capture / burst / stream (standalone, no src.drivers)
+python src/camera_demo.py --capture
+python src/camera_demo.py --capture --vflip
 python src/camera_demo.py --test 30           # burst + FPS report
 python src/camera_demo.py --stream            # MJPEG HTTP on :5000
 
-# Interactive parameter explorer (web UI)
-python tests/test_camera_params.py            # http://<pi>:5000
+# Full-featured 13-param tracking + error analysis (web UI)
+python tests/test_tracking_test.py            # http://<pi>:5000
+
+# Rectangle detection with dual-panel debug (web UI)
+python tests/test_rectangle_detect.py         # http://<pi>:5000
+
+# AE lock / unlock debug tool
+python tests/test_ae_debug.py                 # http://<pi>:5000
 
 # Hardware layer diagnosis
 python tests/test_camera_diagnosis.py         # 7-layer check, prints root cause
-
-# Modular imports (use in your own scripts)
-#   from src.drivers import Camera
-#   from src.vision import MjpegStreamer, BaseTracker
 ```
 
 ## Project Layout
@@ -71,7 +73,7 @@ python tests/test_camera_diagnosis.py         # 7-layer check, prints root cause
 | `src/vision/` | Vision + streaming (`MjpegStreamer`, `BaseTracker`) |
 | `tests/` | Test suites and diagnosis tools |
 | `samples/` | Captured photos (test evidence) |
-| `calibration_data/` | Camera calibration files |
+| `calibration_data/` | Parameter presets (JSON), saved/loaded via web UI |
 | `docs/` | Documentation |
 | `venv/` | Virtual environment |
 
@@ -130,3 +132,7 @@ streamer.stop()
 - Tests in `tests/` need `sys.path.insert(0, str(Path(__file__).resolve().parent.parent))`
   because they are not inside the `src` package hierarchy.
 - No formatter / linter / typechecker is configured.
+- **RPi embedded Chromium does not support `fetch()`.** Test web UIs with inline JS
+  must use `XMLHttpRequest` (sync for `setParam`, async with `onreadystatechange`
+  for save/load/presets). Only `test_tracking_test.py` has been ported so far;
+  other test scripts still use `fetch()` and will show `JS loading...` forever.
