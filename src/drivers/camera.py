@@ -71,7 +71,8 @@ class Camera:
         self._cam = Picamera2()
         if self._sensor_size:
             cfg = self._cam.create_preview_configuration(
-                sensor={"output_size": self._sensor_size}
+                main={"size": (640, 360)},
+                sensor={"output_size": self._sensor_size},
             )
         else:
             cfg = self._cam.create_preview_configuration()
