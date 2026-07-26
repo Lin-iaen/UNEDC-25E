@@ -7,7 +7,7 @@
 提供网页参数滑块、双窗口（检测/二值化）实时调试视图。
 
 用法：
-    python tests/test_rectangle_detect.py
+    python tests/test_rectangle_detect_old.py
     → 打开 http://<pi-ip>:5000，拖动滑块实时观察过滤效果
 """
 
@@ -35,7 +35,7 @@ PARAMS = {
     "MinArea":        500,    # 最小轮廓面积 (px²)
     "MaxAspectRatio": 3.0,    # 最大长宽比（超过视为长条，丢弃）
     "MinContrast":    30,     # 最小对比度差值（白纸灰度 - 胶带灰度）
-    "GlobalThresh":   120,    # 全局二值化阈值（AE 锁定后光照恒定）
+    "GlobalThresh":   120,    # 全局二值化阈值（光照恒定，无需自适应）
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -97,7 +97,7 @@ h3{margin:10px 0 6px;font-size:12px;border-bottom:1px solid #333;padding-bottom:
        oninput="setParam('MinContrast',parseInt(this.value))">
 
 <h3>🧠 二值化</h3>
-<label>阈值 <span class="val" id="v_GlobalThresh">--</span></label>
+<label>全局阈值 <span class="val" id="v_GlobalThresh">--</span></label>
 <input type="range" id="sl_GlobalThresh" min="0" max="255"
        oninput="setParam('GlobalThresh',parseInt(this.value))">
 
@@ -221,7 +221,7 @@ def _order_corners(approx: np.ndarray) -> np.ndarray:
     return np.vstack([top, bottom])
 
 
-def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int]:
+def process_frame(frame: np.ndarray, params: dict) -> np.ndarray:
     """
     主检测函数：在一帧上做矩形检测 + 双窗口合成。
     返回合成后的 BGR 帧（检测结果 | 调试视图）。
@@ -235,10 +235,9 @@ def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int]:
     min_contrast = int(params.get("MinContrast", 30))
     global_thresh = int(params.get("GlobalThresh", 120))
 
-    # ── 全局二值化 ──────────────────────────────────────────────────
-    # AE 锁定后光照归一化，固定阈值稳定可靠。
-    # 产生实心二值区域（非 Canny 的 1px 骨架），确保 findContours
-    # 能形成闭合轮廓，识别率大幅提高。
+    # ── 二值化 ────────────────────────────────────────────────────────
+    # 光照已通过 AE 锁定保持恒定，无需自适应阈值
+    # cv2.threshold 远快于 adaptiveThreshold，ARM 上差距更大
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     _, binary = cv2.threshold(
         blurred, global_thresh, 255, cv2.THRESH_BINARY_INV,
@@ -256,7 +255,7 @@ def process_frame(frame: np.ndarray, params: dict) -> tuple[np.ndarray, int]:
     cv2.drawContours(debug_view, contours, -1, (70, 70, 70), 1)
 
     if hierarchy is None:
-        return _compose_views(detection_view, debug_view, 0), 0
+        return _compose_views(detection_view, debug_view, 0)
 
     hierarchy = hierarchy[0]
     found_pairs: list[tuple[np.ndarray, np.ndarray]] = []
@@ -351,7 +350,6 @@ _frame_count = 0
 _fps = 0.0
 _last_ts = time.perf_counter()
 _rect_count = 0
-_ae_active = False   # True 表示 AE 正在自动调节，需从 metadata 同步参数
 
 
 def main() -> None:
@@ -368,8 +366,8 @@ def main() -> None:
     try:
         from picamera2 import Picamera2
         metadata = cam._cam.capture_metadata()
-        actual_exp = metadata.get("ExposureTime", 10000)
-        actual_gain = metadata.get("AnalogueGain", 4.5)
+        actual_exp = metadata.get("ExposureTime", 20000)
+        actual_gain = metadata.get("AnalogueGain", 1.0)
         PARAMS["ExposureTime"] = actual_exp
         PARAMS["AnalogueGain"] = actual_gain
         # 锁定曝光/增益，防止 AE 后续改动导致二值化阈值漂移
@@ -382,28 +380,12 @@ def main() -> None:
         print("Warning: could not read AE metadata, using defaults")
 
     def frame_provider() -> np.ndarray | None:
-        global _frame_count, _fps, _last_ts, _rect_count, _ae_active
+        global _frame_count, _fps, _last_ts, _rect_count
         frame = cam.read()
         if frame is None:
             return None
 
-        # AE 激活时从 metadata 实时同步曝光/增益到 UI 参数
-        if _ae_active:
-            try:
-                metadata = cam._cam.capture_metadata()
-                PARAMS["ExposureTime"] = metadata.get("ExposureTime", 10000)
-                PARAMS["AnalogueGain"] = metadata.get("AnalogueGain", 4.5)
-            except Exception:
-                pass
-
-        try:
-            result, _rect_count = process_frame(frame, PARAMS)
-        except Exception as e:
-            # process_frame 异常 → 回退到原始帧，保证 MJPEG 不断流
-            import traceback
-            traceback.print_exc()
-            result = np.hstack([frame, np.zeros_like(frame)])
-            _rect_count = -1
+        result, _rect_count = process_frame(frame, PARAMS)
 
         _frame_count += 1
         now = time.perf_counter()
@@ -461,7 +443,6 @@ def _make_route_set(cam: Camera):
     """处理 /set?key=value，更新 PARAMS，相机参数同步到硬件"""
     from flask import jsonify, request
     def handler(**kwargs):
-        global _ae_active
         for key in request.args:
             raw = request.args[key]
             # 尝试转数字
@@ -481,7 +462,6 @@ def _make_route_set(cam: Camera):
                 # 相机参数同步到硬件
                 if matched in ("ExposureTime", "AnalogueGain"):
                     cam.set_params({matched: val})
-                    _ae_active = False  # 手动调参 → 退出 AE 模式
         return jsonify({"ok": True})
     return handler
 
@@ -490,17 +470,8 @@ def _make_route_reset_ae(cam: Camera):
     """恢复自动曝光：解除 ExposureTime 和 AnalogueGain 手动锁定"""
     from flask import jsonify
     def handler(**kwargs):
-        global _ae_active
         # 让 ISP 重新接管曝光和增益
         cam.set_params({"AeEnable": True})
-        _ae_active = True
-        # 立即回读实际值同步到 UI 参数
-        try:
-            metadata = cam._cam.capture_metadata()
-            PARAMS["ExposureTime"] = metadata.get("ExposureTime", 10000)
-            PARAMS["AnalogueGain"] = metadata.get("AnalogueGain", 4.5)
-        except Exception:
-            pass
         print("AE re-enabled")
         return jsonify({"ok": True})
     return handler
